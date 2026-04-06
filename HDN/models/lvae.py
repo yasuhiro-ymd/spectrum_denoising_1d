@@ -347,8 +347,7 @@ class LadderVAE(LightningModule):
         scheduler = {
             'scheduler':
                 optim.lr_scheduler.ReduceLROnPlateau(optimizer,
-                                                     factor=0.5,
-                                                     verbose=True),
+                                                     factor=0.5),
             'monitor':
                 'val/elbo'
         }
