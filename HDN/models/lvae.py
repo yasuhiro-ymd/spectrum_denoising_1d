@@ -137,11 +137,36 @@ class LadderVAE(LightningModule):
                       padding_mode='replicate'))
         self.final_top_down = nn.Sequential(*modules)
 
+    def _extract_signal_channel(self, x):
+        """Return scalar signal channel as [B, 1, W]."""
+        if x.dim() == 3:
+            return x
+        if x.dim() == 4:
+            # Input format: [B, 1, W, 1 + d_model], scalar signal at feature 0.
+            return x[:, :, :, 0]
+        raise ValueError(f"LadderVAE expects 3D or 4D input, got {tuple(x.shape)}")
+
+    def _normalise_input(self, x):
+        """Normalise inputs.
+
+        - 3D: standard scalar normalisation (x - mean) / std
+        - 4D: feature-0 uses (x - mean) / std, PE features (1..) use x / std
+        """
+        if x.dim() == 3:
+            return (x - self.data_mean) / self.data_std
+        if x.dim() == 4:
+            x_norm = x.clone()
+            x_norm[:, :, :, 0] = (x_norm[:, :, :, 0] - self.data_mean) / self.data_std
+            x_norm[:, :, :, 1:] = x_norm[:, :, :, 1:] / self.data_std
+            return x_norm
+        raise ValueError(f"LadderVAE expects 3D or 4D input, got {tuple(x.shape)}")
+
     def forward(self, x):
-        img_size = x.size()[2]
+        x_signal = self._extract_signal_channel(x)
+        img_size = x_signal.size()[2]
 
         # Pad x to have base 2 side lengths to make resampling steps simpler
-        x_pad = self.pad_input(x)
+        x_pad = self.pad_input(x_signal)
 
         # Bottom-up inference: return list of length n_layers (bottom to top)
         bu_values = self.bottomup_pass(x_pad)
@@ -151,21 +176,31 @@ class LadderVAE(LightningModule):
 
         if not self.mode_pred:
             kl_sums = [torch.sum(layer) for layer in kl]
-            kl_loss = sum(kl_sums) / float(x.shape[0] * x.shape[1] * x.shape[2])
+            kl_loss = sum(kl_sums) / float(
+                x_signal.shape[0] * x_signal.shape[1] * x_signal.shape[2]
+            )
         else:
             kl_loss = None
 
         # Restore original image size
         predicted_signal = crop_img_tensor(out, img_size)
 
-        x_denormalised = x * self.data_std + self.data_mean
+        x_denormalised = x_signal * self.data_std + self.data_mean
         predicted_signal_denormalised = predicted_signal * self.data_std + self.data_mean
 
         predicted_noise = x_denormalised - predicted_signal_denormalised
 
         if not self.mode_pred:
+            # For 4D inputs, keep PE channels as conditioning input to noise model
+            # and replace only feature-0 with predicted scalar noise.
+            if x.dim() == 4:
+                predicted_noise_input = x.clone()
+                predicted_noise_input[:, :, :, 0] = predicted_noise[:, :, :]
+            else:
+                predicted_noise_input = predicted_noise
+
             # Noise model returns log[p(x|predicted_s)]
-            ll = self.noise_model.loglikelihood(predicted_noise)
+            ll = self.noise_model.loglikelihood(predicted_noise_input)
             ll = ll.mean()
         else:
             ll = None
@@ -282,8 +317,8 @@ class LadderVAE(LightningModule):
         return top_layer_shape
 
     def training_step(self, batch, _):
-        # Normalise data
-        x = (batch - self.data_mean) / self.data_std
+        # For 4D inputs, only scalar channel is normalised/modelled by VAE.
+        x = self._normalise_input(batch)
         # Returns dictionary containing predicted signal and loss terms
         model_out = self.forward(x)
 
@@ -300,6 +335,7 @@ class LadderVAE(LightningModule):
         return elbo
 
     def log_images_for_tensorboard(self, x, samples, median):
+        x = self._extract_signal_channel(x)
         figure = plt.figure()
         plt.plot(x[0, 0].cpu(), color="blue", label="Attenuated")
         plt.plot(median[0, 0].cpu(), color="orange", label="Denoised")
@@ -312,7 +348,7 @@ class LadderVAE(LightningModule):
                                                  self.current_epoch)
 
     def validation_step(self, batch, batch_idx):
-        x = (batch - self.data_mean) / self.data_std
+        x = self._normalise_input(batch)
         model_out = self.forward(x)
 
         recons_loss = -model_out['ll']
@@ -337,7 +373,7 @@ class LadderVAE(LightningModule):
     def predict_step(self, batch, _):
         # Don't calculate loss or carry out masking
         self.mode_pred = True
-        x = (batch - self.data_mean) / self.data_std
+        x = self._normalise_input(batch)
         out = self.forward(x)['predicted_signal']
         out = out * self.data_std + self.data_mean
         return out

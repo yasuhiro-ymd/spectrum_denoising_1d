@@ -13,16 +13,20 @@ def show_center_recep_field(arr, out):
               the output of the network/computation graph.
     """
     # Determine gradients
-    loss = out[..., arr.shape[-1] - 1].sum()
+    loss = out[..., out.shape[-1] - 1].sum()
     # Retain graph as we want to stack multiple layers and show the receptive field of all of them
     loss.backward(retain_graph=True)
     arr_grads = arr.grad.abs()
     arr.grad.fill_(0)  # Reset grads
 
     # Plot receptive field
-    arr = arr_grads.squeeze().cpu().numpy()
+    grads = arr_grads.squeeze()
+    if grads.dim() == 2:
+        # 4D PE input: [W, F] -> sum over feature dim
+        grads = grads.sum(dim=-1)
+    arr_np = grads.cpu().numpy()
     _, ax = plt.subplots()
-    ax.plot(arr > 0, "o")
+    ax.plot(arr_np > 0, "o")
     ax.set_xlabel("Time")
     ax.set_ylabel("Binary receptive field")
     plt.show()

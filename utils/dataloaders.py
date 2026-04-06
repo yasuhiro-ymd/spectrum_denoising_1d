@@ -10,12 +10,18 @@ class Dataset(torch.utils.data.Dataset):
             
         if self.data.dim() == 2:
             self.data = self.data[:, np.newaxis]
-        elif self.data.dim() != 3:
-            print('Data dimensions should be [B, C, W] or [B, W]')
+        elif self.data.dim() not in (3, 4):
+            print('Data dimensions should be [B, C, W], [B, C, W, F] or [B, W]')
                 
     def getparams(self):
-        data_mean = torch.mean(self.data)
-        data_std = torch.std(self.data)
+        if self.data.dim() == 4:
+            # For [B, C, W, F], use scalar signal feature (index 0).
+            scalar = self.data[..., 0]
+            data_mean = torch.mean(scalar)
+            data_std = torch.std(scalar)
+        else:
+            data_mean = torch.mean(self.data)
+            data_std = torch.std(self.data)
         return data_mean, data_std
     
     def getimgwidth(self):
